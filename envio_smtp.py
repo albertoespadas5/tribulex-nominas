@@ -37,11 +37,12 @@ def generar_cuerpo_ia(nombre_empresa, nombre_zip, mes, notas_cliente, gemini_api
     Returns:
         (True, texto_generado) o (False, mensaje_error)
     """
+    import time
     try:
         import google.generativeai as genai
 
         genai.configure(api_key=gemini_api_key)
-        model = genai.GenerativeModel("gemini-2.0-flash")
+        model = genai.GenerativeModel("gemini-1.5-flash")
 
         prompt = (
             f"Redacta un correo electronico profesional y breve en español para enviar "
@@ -59,9 +60,20 @@ def generar_cuerpo_ia(nombre_empresa, nombre_zip, mes, notas_cliente, gemini_api
             f"- Devuelve SOLO el cuerpo del correo, sin asunto ni encabezados extra."
         )
 
-        response = model.generate_content(prompt)
-        texto = response.text.strip()
-        return True, texto
+        # Reintento con backoff exponencial (max 3 intentos)
+        max_intentos = 3
+        for intento in range(max_intentos):
+            try:
+                response = model.generate_content(prompt)
+                texto = response.text.strip()
+                return True, texto
+            except Exception as e:
+                error_str = str(e)
+                es_reintentable = "429" in error_str or "quota" in error_str.lower() or "resource" in error_str.lower()
+                if es_reintentable and intento < max_intentos - 1:
+                    time.sleep(2 ** intento)  # 1s, 2s
+                    continue
+                raise
 
     except Exception as e:
         return False, f"Error Gemini: {e}"
