@@ -12,7 +12,7 @@ from clientes_db import (
     listar_clientes, obtener_cliente, buscar_por_empresa,
     crear_cliente, actualizar_cliente, eliminar_cliente,
 )
-from envio_smtp import enviar_zip_por_email
+from envio_smtp import enviar_zip_por_email, generar_cuerpo_estandar, generar_cuerpo_ia
 
 # ── Configuración de página ────────────────────────────────────────────
 st.set_page_config(
@@ -594,6 +594,7 @@ with main_tab_nominas:
 
                 # Verificar credenciales SMTP
                 smtp_ok = False
+                gemini_ok = False
                 try:
                     smtp_user = st.secrets["email_usuario"]
                     smtp_pass = st.secrets["password_app"]
@@ -602,106 +603,157 @@ with main_tab_nominas:
                     st.warning(
                         "Credenciales SMTP no configuradas. A\u00f1ade `email_usuario` y "
                         "`password_app` en **Settings > Secrets** de Streamlit Cloud, "
-                        "o en el archivo `.streamlit/secrets.toml` para uso local."
+                        "o en `.streamlit/secrets.toml` para uso local."
                     )
 
+                try:
+                    gemini_key = st.secrets["GEMINI_API_KEY"]
+                    gemini_ok = True
+                except Exception:
+                    gemini_key = None
+
                 if smtp_ok:
-                    st.info(f"Remitente configurado: **{smtp_user}** (Gmail SMTP)")
+                    col_status1, col_status2 = st.columns(2)
+                    with col_status1:
+                        st.info(f"Remitente: **{smtp_user}** (Gmail SMTP)")
+                    with col_status2:
+                        if gemini_ok:
+                            st.info("Redacci\u00f3n IA: **Gemini activo**")
+                        else:
+                            st.warning("Gemini no configurado \u2014 se usar\u00e1 texto est\u00e1ndar")
+
                     st.markdown("---")
 
-                    for empresa_nombre in sorted(empresas_set):
-                        cliente = buscar_por_empresa(empresa_nombre)
-
-                        # Encontrar el ZIP de esta empresa
-                        zip_nombre_match = None
-                        zip_bytes_match = None
+                    # Helper para encontrar ZIP de una empresa
+                    def _buscar_zip(emp_nombre):
                         for zn, zb in zips_dict.items():
-                            # Comparar por nombre corto o nombre completo
-                            empresa_en_zip = empresa_nombre.replace(" ", "_")
-                            if empresa_en_zip in zn or any(
-                                nc in zn for nc in [empresa_en_zip]
+                            emp_zip = emp_nombre.replace(" ", "_")
+                            if emp_zip in zn or any(
+                                nc in zn for nc in [emp_zip]
                                 + [v for k, v in {
                                     "Talleres Paco SL": "TalleresPaco",
                                     "Consultor\u00eda Beta": "ConsultoriaBeta",
                                     "Restaurante El Puerto": "RestauranteElPuerto",
-                                }.items() if k == empresa_nombre]
+                                }.items() if k == emp_nombre]
                             ):
-                                zip_nombre_match = zn
-                                zip_bytes_match = zb
-                                break
+                                return zn, zb
+                        return None, None
 
-                        col_info, col_btn = st.columns([3, 1])
+                    # ── Por cada empresa: generar borrador y mostrar editor ──
+                    for empresa_nombre in sorted(empresas_set):
+                        cliente = buscar_por_empresa(empresa_nombre)
+                        zip_nombre_match, zip_bytes_match = _buscar_zip(empresa_nombre)
 
-                        with col_info:
-                            if cliente and cliente["email_contacto"]:
-                                notas_txt = cliente["notas"] or "Sin notas"
-                                st.markdown(
-                                    f"**{empresa_nombre}** → `{cliente['email_contacto']}` "
-                                    f"| {cliente['preferencia_envio']} "
-                                    f"| Notas: _{notas_txt}_"
-                                )
-                            elif cliente:
-                                st.markdown(
-                                    f"**{empresa_nombre}** → Sin email de contacto registrado"
-                                )
-                            else:
-                                st.markdown(
-                                    f"**{empresa_nombre}** → No registrado en BD de clientes"
-                                )
+                        puede_enviar = (
+                            cliente
+                            and cliente["email_contacto"]
+                            and zip_bytes_match
+                            and cliente["preferencia_envio"] != "No enviar"
+                        )
 
-                        with col_btn:
-                            puede_enviar = (
-                                cliente
-                                and cliente["email_contacto"]
-                                and zip_bytes_match
-                                and cliente["preferencia_envio"] != "No enviar"
+                        safe_key = empresa_nombre.replace(" ", "_").replace(".", "")
+
+                        # Cabecera de la empresa
+                        if cliente and cliente["email_contacto"]:
+                            st.markdown(
+                                f"**{empresa_nombre}** → `{cliente['email_contacto']}` "
+                                f"| {cliente['preferencia_envio']}"
                             )
-                            btn_key = f"btn_enviar_{empresa_nombre.replace(' ', '_')}"
+                        elif cliente:
+                            st.markdown(f"**{empresa_nombre}** → Sin email registrado")
+                        else:
+                            st.markdown(f"**{empresa_nombre}** → No registrado en BD de clientes")
 
-                            if puede_enviar:
-                                if st.button(f"Enviar ZIP", key=btn_key, type="primary"):
-                                    with st.spinner(f"Enviando a {cliente['email_contacto']}..."):
-                                        ok, msg = enviar_zip_por_email(
-                                            usuario_smtp=smtp_user,
-                                            password_smtp=smtp_pass,
-                                            destinatario=cliente["email_contacto"],
-                                            nombre_empresa=empresa_nombre,
-                                            nombre_zip=zip_nombre_match,
-                                            zip_bytes=zip_bytes_match,
-                                            mes=mes_elegido,
-                                            notas_cliente=cliente.get("notas", ""),
-                                        )
-                                    if ok:
-                                        st.success(f"Enviado: {msg}")
-                                    else:
-                                        st.error(f"Fallo: {msg}")
-                            else:
-                                st.button(
-                                    "Sin email",
-                                    key=btn_key,
-                                    disabled=True,
+                        if not puede_enviar:
+                            st.button("Sin email", key=f"btn_ne_{safe_key}", disabled=True)
+                            st.markdown("---")
+                            continue
+
+                        # ── Generar borrador (IA o estandar) ─────────────
+                        session_key = f"borrador_{safe_key}"
+                        session_src = f"borrador_src_{safe_key}"
+
+                        if session_key not in st.session_state:
+                            notas = cliente.get("notas", "").strip()
+                            if notas and gemini_ok:
+                                ok_ia, texto_ia = generar_cuerpo_ia(
+                                    empresa_nombre, zip_nombre_match,
+                                    mes_elegido, notas, gemini_key,
                                 )
+                                if ok_ia:
+                                    st.session_state[session_key] = texto_ia
+                                    st.session_state[session_src] = "gemini"
+                                else:
+                                    st.session_state[session_key] = generar_cuerpo_estandar(
+                                        empresa_nombre, zip_nombre_match, mes_elegido,
+                                    )
+                                    st.session_state[session_src] = "estandar"
+                                    st.warning(f"Gemini no disponible: {texto_ia}. Usando texto est\u00e1ndar.")
+                            else:
+                                st.session_state[session_key] = generar_cuerpo_estandar(
+                                    empresa_nombre, zip_nombre_match, mes_elegido,
+                                )
+                                st.session_state[session_src] = "estandar"
+
+                        origen = st.session_state.get(session_src, "estandar")
+                        if origen == "gemini":
+                            st.caption("Borrador generado por Gemini IA \u2014 rev\u00edsalo antes de enviar:")
+                        else:
+                            st.caption("Texto est\u00e1ndar \u2014 puedes editarlo antes de enviar:")
+
+                        cuerpo_editado = st.text_area(
+                            f"Cuerpo del email para {empresa_nombre}",
+                            value=st.session_state[session_key],
+                            height=180,
+                            key=f"ta_{safe_key}",
+                            label_visibility="collapsed",
+                        )
+
+                        col_enviar, col_regen = st.columns([3, 1])
+
+                        with col_enviar:
+                            if st.button(f"Confirmar y Enviar", key=f"btn_env_{safe_key}", type="primary"):
+                                with st.spinner(f"Enviando a {cliente['email_contacto']}..."):
+                                    ok, msg = enviar_zip_por_email(
+                                        usuario_smtp=smtp_user,
+                                        password_smtp=smtp_pass,
+                                        destinatario=cliente["email_contacto"],
+                                        nombre_empresa=empresa_nombre,
+                                        nombre_zip=zip_nombre_match,
+                                        zip_bytes=zip_bytes_match,
+                                        mes=mes_elegido,
+                                        cuerpo_email=cuerpo_editado,
+                                    )
+                                if ok:
+                                    st.success(f"Enviado: {msg}")
+                                else:
+                                    st.error(f"Fallo: {msg}")
+
+                        with col_regen:
+                            if gemini_ok and cliente.get("notas", "").strip():
+                                if st.button("Regenerar IA", key=f"btn_reg_{safe_key}"):
+                                    ok_ia, texto_ia = generar_cuerpo_ia(
+                                        empresa_nombre, zip_nombre_match,
+                                        mes_elegido, cliente["notas"], gemini_key,
+                                    )
+                                    if ok_ia:
+                                        st.session_state[session_key] = texto_ia
+                                        st.session_state[session_src] = "gemini"
+                                        st.rerun()
+                                    else:
+                                        st.error(texto_ia)
 
                         st.markdown("---")
 
-                    # Boton de enviar todo a la vez
-                    st.markdown("")
+                    # ── Boton enviar todo ─────────────────────────────
                     empresas_enviables = []
                     for emp in sorted(empresas_set):
                         cli = buscar_por_empresa(emp)
                         if cli and cli["email_contacto"] and cli["preferencia_envio"] != "No enviar":
-                            for zn, zb in zips_dict.items():
-                                emp_zip = emp.replace(" ", "_")
-                                if emp_zip in zn or any(
-                                    nc in zn for nc in [emp_zip]
-                                    + [v for k, v in {
-                                        "Talleres Paco SL": "TalleresPaco",
-                                        "Consultor\u00eda Beta": "ConsultoriaBeta",
-                                        "Restaurante El Puerto": "RestauranteElPuerto",
-                                    }.items() if k == emp]
-                                ):
-                                    empresas_enviables.append((emp, cli, zn, zb))
-                                    break
+                            zn, zb = _buscar_zip(emp)
+                            if zb:
+                                sk = emp.replace(" ", "_").replace(".", "")
+                                empresas_enviables.append((emp, cli, zn, zb, sk))
 
                     if len(empresas_enviables) > 1:
                         if st.button(
@@ -711,10 +763,18 @@ with main_tab_nominas:
                         ):
                             barra_envio = st.progress(0, text="Enviando...")
                             resultados = []
-                            for idx, (emp, cli, zn, zb) in enumerate(empresas_enviables):
+                            for idx, (emp, cli, zn, zb, sk) in enumerate(empresas_enviables):
                                 barra_envio.progress(
                                     int((idx / len(empresas_enviables)) * 100),
                                     text=f"Enviando a {cli['email_contacto']}...",
+                                )
+                                # Usar el texto editado del text_area
+                                cuerpo_final = st.session_state.get(
+                                    f"ta_{sk}",
+                                    st.session_state.get(
+                                        f"borrador_{sk}",
+                                        generar_cuerpo_estandar(emp, zn, mes_elegido),
+                                    ),
                                 )
                                 ok, msg = enviar_zip_por_email(
                                     usuario_smtp=smtp_user,
@@ -724,7 +784,7 @@ with main_tab_nominas:
                                     nombre_zip=zn,
                                     zip_bytes=zb,
                                     mes=mes_elegido,
-                                    notas_cliente=cli.get("notas", ""),
+                                    cuerpo_email=cuerpo_final,
                                 )
                                 resultados.append((emp, cli["email_contacto"], ok, msg))
 
