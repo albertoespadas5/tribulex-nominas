@@ -12,7 +12,10 @@ from clientes_db import (
     listar_clientes, obtener_cliente, buscar_por_empresa,
     crear_cliente, actualizar_cliente, eliminar_cliente,
 )
-from envio_smtp import enviar_zip_por_email, generar_cuerpo_estandar, generar_cuerpo_ia
+from envio_smtp import (
+    enviar_zip_por_email, generar_cuerpo_estandar, generar_cuerpo_ia,
+    verificar_gemini,
+)
 
 # ── Configuración de página ────────────────────────────────────────────
 st.set_page_config(
@@ -595,6 +598,7 @@ with main_tab_nominas:
                 # Verificar credenciales SMTP
                 smtp_ok = False
                 gemini_ok = False
+                gemini_key = None
                 try:
                     smtp_user = st.secrets["email_usuario"]
                     smtp_pass = st.secrets["password_app"]
@@ -608,9 +612,17 @@ with main_tab_nominas:
 
                 try:
                     gemini_key = st.secrets["GEMINI_API_KEY"]
-                    gemini_ok = True
                 except Exception:
-                    gemini_key = None
+                    pass
+
+                # Verificar Gemini al arrancar (cacheado en session_state)
+                if gemini_key:
+                    if "gemini_verificado" not in st.session_state:
+                        with st.spinner("Verificando conexi\u00f3n con Gemini..."):
+                            ok_g, msg_g = verificar_gemini(gemini_key)
+                        st.session_state.gemini_verificado = ok_g
+                        st.session_state.gemini_msg = msg_g
+                    gemini_ok = st.session_state.gemini_verificado
 
                 if smtp_ok:
                     col_status1, col_status2 = st.columns(2)
@@ -618,9 +630,11 @@ with main_tab_nominas:
                         st.info(f"Remitente: **{smtp_user}** (Gmail SMTP)")
                     with col_status2:
                         if gemini_ok:
-                            st.info("Redacci\u00f3n IA: **Gemini activo**")
+                            st.success(f"{st.session_state.get('gemini_msg', 'Gemini OK')}")
+                        elif gemini_key:
+                            st.error(f"Gemini fallo: {st.session_state.get('gemini_msg', 'Error')} — se usar\u00e1 texto est\u00e1ndar")
                         else:
-                            st.warning("Gemini no configurado \u2014 se usar\u00e1 texto est\u00e1ndar")
+                            st.warning("GEMINI_API_KEY no configurada \u2014 se usar\u00e1 texto est\u00e1ndar")
 
                     st.markdown("---")
 

@@ -5,12 +5,34 @@ Soporta redaccion inteligente con Gemini AI.
 """
 
 import smtplib
+import time
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 587
+GEMINI_MODEL = "gemini-1.5-flash-latest"
+
+
+def verificar_gemini(api_key):
+    """
+    Verifica que la API Key de Gemini es valida y el modelo responde.
+
+    Returns:
+        (True, "Gemini OK — modelo: ...") o (False, "mensaje de error")
+    """
+    try:
+        import google.generativeai as genai
+
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(GEMINI_MODEL)
+        response = model.generate_content("Responde solo: OK")
+        if response and response.text:
+            return True, f"Gemini OK — modelo: {GEMINI_MODEL}"
+        return False, "Gemini respondio vacio"
+    except Exception as e:
+        return False, f"Gemini no disponible: {e}"
 
 
 def generar_cuerpo_estandar(nombre_empresa, nombre_zip, mes):
@@ -33,16 +55,16 @@ def generar_cuerpo_ia(nombre_empresa, nombre_zip, mes, notas_cliente, gemini_api
     """
     Usa Gemini para redactar un correo profesional que incorpore las notas
     del cliente de forma natural en el cuerpo del email.
+    Incluye retry con backoff exponencial y Plan B automatico.
 
     Returns:
         (True, texto_generado) o (False, mensaje_error)
     """
-    import time
     try:
         import google.generativeai as genai
 
         genai.configure(api_key=gemini_api_key)
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = genai.GenerativeModel(GEMINI_MODEL)
 
         prompt = (
             f"Redacta un correo electronico profesional y breve en español para enviar "
@@ -68,10 +90,12 @@ def generar_cuerpo_ia(nombre_empresa, nombre_zip, mes, notas_cliente, gemini_api
                 texto = response.text.strip()
                 return True, texto
             except Exception as e:
-                error_str = str(e)
-                es_reintentable = "429" in error_str or "quota" in error_str.lower() or "resource" in error_str.lower()
+                error_str = str(e).lower()
+                es_reintentable = any(
+                    kw in error_str for kw in ["429", "quota", "resource", "exhausted", "limit"]
+                )
                 if es_reintentable and intento < max_intentos - 1:
-                    time.sleep(2 ** intento)  # 1s, 2s
+                    time.sleep(2 ** (intento + 1))  # 2s, 4s
                     continue
                 raise
 
