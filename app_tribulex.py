@@ -12,6 +12,7 @@ from clientes_db import (
     listar_clientes, obtener_cliente, buscar_por_empresa,
     crear_cliente, actualizar_cliente, eliminar_cliente,
 )
+from envio_smtp import enviar_zip_por_email
 
 # ── Configuración de página ────────────────────────────────────────────
 st.set_page_config(
@@ -495,10 +496,11 @@ with main_tab_nominas:
             """, unsafe_allow_html=True)
 
             # ── Tabs de resultados ────────────────────────────────
-            tab_detalle, tab_resumen, tab_zips = st.tabs([
+            tab_detalle, tab_resumen, tab_zips, tab_enviar = st.tabs([
                 "Detalle de N\u00f3minas",
                 "Resumen por Empresa",
                 "Descargar ZIPs",
+                "Enviar por Email",
             ])
 
             # ── Tab 1: Detalle ────────────────────────────────────
@@ -582,6 +584,158 @@ with main_tab_nominas:
                             mime="application/zip",
                             key=f"dl_zip_{i}",
                         )
+
+                st.markdown("</div>", unsafe_allow_html=True)
+
+            # ── Tab 4: Enviar por Email ───────────────────────────
+            with tab_enviar:
+                st.markdown('<div class="section-panel">', unsafe_allow_html=True)
+                st.markdown('<div class="section-title">📧 Enviar N\u00f3minas por Email</div>', unsafe_allow_html=True)
+
+                # Verificar credenciales SMTP
+                smtp_ok = False
+                try:
+                    smtp_user = st.secrets["email_usuario"]
+                    smtp_pass = st.secrets["password_app"]
+                    smtp_ok = True
+                except Exception:
+                    st.warning(
+                        "Credenciales SMTP no configuradas. A\u00f1ade `email_usuario` y "
+                        "`password_app` en **Settings > Secrets** de Streamlit Cloud, "
+                        "o en el archivo `.streamlit/secrets.toml` para uso local."
+                    )
+
+                if smtp_ok:
+                    st.info(f"Remitente configurado: **{smtp_user}** (Gmail SMTP)")
+                    st.markdown("---")
+
+                    for empresa_nombre in sorted(empresas_set):
+                        cliente = buscar_por_empresa(empresa_nombre)
+
+                        # Encontrar el ZIP de esta empresa
+                        zip_nombre_match = None
+                        zip_bytes_match = None
+                        for zn, zb in zips_dict.items():
+                            # Comparar por nombre corto o nombre completo
+                            empresa_en_zip = empresa_nombre.replace(" ", "_")
+                            if empresa_en_zip in zn or any(
+                                nc in zn for nc in [empresa_en_zip]
+                                + [v for k, v in {
+                                    "Talleres Paco SL": "TalleresPaco",
+                                    "Consultor\u00eda Beta": "ConsultoriaBeta",
+                                    "Restaurante El Puerto": "RestauranteElPuerto",
+                                }.items() if k == empresa_nombre]
+                            ):
+                                zip_nombre_match = zn
+                                zip_bytes_match = zb
+                                break
+
+                        col_info, col_btn = st.columns([3, 1])
+
+                        with col_info:
+                            if cliente and cliente["email_contacto"]:
+                                notas_txt = cliente["notas"] or "Sin notas"
+                                st.markdown(
+                                    f"**{empresa_nombre}** → `{cliente['email_contacto']}` "
+                                    f"| {cliente['preferencia_envio']} "
+                                    f"| Notas: _{notas_txt}_"
+                                )
+                            elif cliente:
+                                st.markdown(
+                                    f"**{empresa_nombre}** → Sin email de contacto registrado"
+                                )
+                            else:
+                                st.markdown(
+                                    f"**{empresa_nombre}** → No registrado en BD de clientes"
+                                )
+
+                        with col_btn:
+                            puede_enviar = (
+                                cliente
+                                and cliente["email_contacto"]
+                                and zip_bytes_match
+                                and cliente["preferencia_envio"] != "No enviar"
+                            )
+                            btn_key = f"btn_enviar_{empresa_nombre.replace(' ', '_')}"
+
+                            if puede_enviar:
+                                if st.button(f"Enviar ZIP", key=btn_key, type="primary"):
+                                    with st.spinner(f"Enviando a {cliente['email_contacto']}..."):
+                                        ok, msg = enviar_zip_por_email(
+                                            usuario_smtp=smtp_user,
+                                            password_smtp=smtp_pass,
+                                            destinatario=cliente["email_contacto"],
+                                            nombre_empresa=empresa_nombre,
+                                            nombre_zip=zip_nombre_match,
+                                            zip_bytes=zip_bytes_match,
+                                            mes=mes_elegido,
+                                            notas_cliente=cliente.get("notas", ""),
+                                        )
+                                    if ok:
+                                        st.success(f"Enviado: {msg}")
+                                    else:
+                                        st.error(f"Fallo: {msg}")
+                            else:
+                                st.button(
+                                    "Sin email",
+                                    key=btn_key,
+                                    disabled=True,
+                                )
+
+                        st.markdown("---")
+
+                    # Boton de enviar todo a la vez
+                    st.markdown("")
+                    empresas_enviables = []
+                    for emp in sorted(empresas_set):
+                        cli = buscar_por_empresa(emp)
+                        if cli and cli["email_contacto"] and cli["preferencia_envio"] != "No enviar":
+                            for zn, zb in zips_dict.items():
+                                emp_zip = emp.replace(" ", "_")
+                                if emp_zip in zn or any(
+                                    nc in zn for nc in [emp_zip]
+                                    + [v for k, v in {
+                                        "Talleres Paco SL": "TalleresPaco",
+                                        "Consultor\u00eda Beta": "ConsultoriaBeta",
+                                        "Restaurante El Puerto": "RestauranteElPuerto",
+                                    }.items() if k == emp]
+                                ):
+                                    empresas_enviables.append((emp, cli, zn, zb))
+                                    break
+
+                    if len(empresas_enviables) > 1:
+                        if st.button(
+                            f"ENVIAR TODO ({len(empresas_enviables)} empresas)",
+                            key="btn_enviar_todo",
+                            type="primary",
+                        ):
+                            barra_envio = st.progress(0, text="Enviando...")
+                            resultados = []
+                            for idx, (emp, cli, zn, zb) in enumerate(empresas_enviables):
+                                barra_envio.progress(
+                                    int((idx / len(empresas_enviables)) * 100),
+                                    text=f"Enviando a {cli['email_contacto']}...",
+                                )
+                                ok, msg = enviar_zip_por_email(
+                                    usuario_smtp=smtp_user,
+                                    password_smtp=smtp_pass,
+                                    destinatario=cli["email_contacto"],
+                                    nombre_empresa=emp,
+                                    nombre_zip=zn,
+                                    zip_bytes=zb,
+                                    mes=mes_elegido,
+                                    notas_cliente=cli.get("notas", ""),
+                                )
+                                resultados.append((emp, cli["email_contacto"], ok, msg))
+
+                            barra_envio.progress(100, text="Completado")
+                            barra_envio.empty()
+
+                            for emp, email, ok, msg in resultados:
+                                if ok:
+                                    st.success(f"{emp} → {email}: Enviado")
+                                else:
+                                    st.error(f"{emp} → {email}: {msg}")
 
                 st.markdown("</div>", unsafe_allow_html=True)
 

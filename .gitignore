@@ -3,3 +3,4 @@
 __pycache__/
 clientes.db
 NÓMINAS/
+.streamlit/secrets.toml
