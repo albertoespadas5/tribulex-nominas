@@ -1,0 +1,5 @@
+.env
+.tribulex_prefs.json
+__pycache__/
+clientes.db
+NÓMINAS/
