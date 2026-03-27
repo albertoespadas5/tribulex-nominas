@@ -12,10 +12,7 @@ from clientes_db import (
     listar_clientes, obtener_cliente, buscar_por_empresa,
     crear_cliente, actualizar_cliente, eliminar_cliente,
 )
-from envio_smtp import (
-    enviar_zip_por_email, generar_cuerpo_estandar, generar_cuerpo_ia,
-    verificar_gemini,
-)
+from envio_smtp import enviar_zip_por_email, generar_cuerpo_estandar
 
 # ── Configuración de página ────────────────────────────────────────────
 st.set_page_config(
@@ -597,8 +594,6 @@ with main_tab_nominas:
 
                 # Verificar credenciales SMTP
                 smtp_ok = False
-                gemini_ok = False
-                gemini_key = None
                 try:
                     smtp_user = st.secrets["email_usuario"]
                     smtp_pass = st.secrets["password_app"]
@@ -610,32 +605,8 @@ with main_tab_nominas:
                         "o en `.streamlit/secrets.toml` para uso local."
                     )
 
-                try:
-                    gemini_key = st.secrets["GEMINI_API_KEY"]
-                except Exception:
-                    pass
-
-                # Verificar Gemini al arrancar (cacheado en session_state)
-                if gemini_key:
-                    if "gemini_verificado" not in st.session_state:
-                        with st.spinner("Verificando conexi\u00f3n con Gemini..."):
-                            ok_g, msg_g = verificar_gemini(gemini_key)
-                        st.session_state.gemini_verificado = ok_g
-                        st.session_state.gemini_msg = msg_g
-                    gemini_ok = st.session_state.gemini_verificado
-
                 if smtp_ok:
-                    col_status1, col_status2 = st.columns(2)
-                    with col_status1:
-                        st.info(f"Remitente: **{smtp_user}** (Gmail SMTP)")
-                    with col_status2:
-                        if gemini_ok:
-                            st.success(f"{st.session_state.get('gemini_msg', 'Gemini OK')}")
-                        elif gemini_key:
-                            st.error(f"Gemini fallo: {st.session_state.get('gemini_msg', 'Error')} — se usar\u00e1 texto est\u00e1ndar")
-                        else:
-                            st.warning("GEMINI_API_KEY no configurada \u2014 se usar\u00e1 texto est\u00e1ndar")
-
+                    st.info(f"Remitente configurado: **{smtp_user}** (Gmail SMTP)")
                     st.markdown("---")
 
                     # Helper para encontrar ZIP de una empresa
@@ -653,7 +624,7 @@ with main_tab_nominas:
                                 return zn, zb
                         return None, None
 
-                    # ── Por cada empresa: generar borrador y mostrar editor ──
+                    # ── Por cada empresa: mostrar editor y boton enviar ──
                     for empresa_nombre in sorted(empresas_set):
                         cliente = buscar_por_empresa(empresa_nombre)
                         zip_nombre_match, zip_bytes_match = _buscar_zip(empresa_nombre)
@@ -683,37 +654,18 @@ with main_tab_nominas:
                             st.markdown("---")
                             continue
 
-                        # ── Generar borrador (IA o estandar) ─────────────
+                        # ── Borrador editable ────────────────────────
                         session_key = f"borrador_{safe_key}"
-                        session_src = f"borrador_src_{safe_key}"
-
                         if session_key not in st.session_state:
-                            notas = cliente.get("notas", "").strip()
-                            if notas and gemini_ok:
-                                ok_ia, texto_ia = generar_cuerpo_ia(
-                                    empresa_nombre, zip_nombre_match,
-                                    mes_elegido, notas, gemini_key,
-                                )
-                                if ok_ia:
-                                    st.session_state[session_key] = texto_ia
-                                    st.session_state[session_src] = "gemini"
-                                else:
-                                    st.session_state[session_key] = generar_cuerpo_estandar(
-                                        empresa_nombre, zip_nombre_match, mes_elegido,
-                                    )
-                                    st.session_state[session_src] = "estandar"
-                                    st.warning(f"Gemini no disponible: {texto_ia}. Usando texto est\u00e1ndar.")
-                            else:
-                                st.session_state[session_key] = generar_cuerpo_estandar(
-                                    empresa_nombre, zip_nombre_match, mes_elegido,
-                                )
-                                st.session_state[session_src] = "estandar"
+                            st.session_state[session_key] = generar_cuerpo_estandar(
+                                empresa_nombre, zip_nombre_match, mes_elegido,
+                            )
 
-                        origen = st.session_state.get(session_src, "estandar")
-                        if origen == "gemini":
-                            st.caption("Borrador generado por Gemini IA \u2014 rev\u00edsalo antes de enviar:")
-                        else:
-                            st.caption("Texto est\u00e1ndar \u2014 puedes editarlo antes de enviar:")
+                        notas = cliente.get("notas", "").strip()
+                        if notas:
+                            st.caption(f"Notas del cliente: _{notas}_")
+
+                        st.caption("Edita el cuerpo del correo a tu gusto antes de enviar:")
 
                         cuerpo_editado = st.text_area(
                             f"Cuerpo del email para {empresa_nombre}",
@@ -723,39 +675,22 @@ with main_tab_nominas:
                             label_visibility="collapsed",
                         )
 
-                        col_enviar, col_regen = st.columns([3, 1])
-
-                        with col_enviar:
-                            if st.button(f"Confirmar y Enviar", key=f"btn_env_{safe_key}", type="primary"):
-                                with st.spinner(f"Enviando a {cliente['email_contacto']}..."):
-                                    ok, msg = enviar_zip_por_email(
-                                        usuario_smtp=smtp_user,
-                                        password_smtp=smtp_pass,
-                                        destinatario=cliente["email_contacto"],
-                                        nombre_empresa=empresa_nombre,
-                                        nombre_zip=zip_nombre_match,
-                                        zip_bytes=zip_bytes_match,
-                                        mes=mes_elegido,
-                                        cuerpo_email=cuerpo_editado,
-                                    )
-                                if ok:
-                                    st.success(f"Enviado: {msg}")
-                                else:
-                                    st.error(f"Fallo: {msg}")
-
-                        with col_regen:
-                            if gemini_ok and cliente.get("notas", "").strip():
-                                if st.button("Regenerar IA", key=f"btn_reg_{safe_key}"):
-                                    ok_ia, texto_ia = generar_cuerpo_ia(
-                                        empresa_nombre, zip_nombre_match,
-                                        mes_elegido, cliente["notas"], gemini_key,
-                                    )
-                                    if ok_ia:
-                                        st.session_state[session_key] = texto_ia
-                                        st.session_state[session_src] = "gemini"
-                                        st.rerun()
-                                    else:
-                                        st.error(texto_ia)
+                        if st.button("Confirmar y Enviar", key=f"btn_env_{safe_key}", type="primary"):
+                            with st.spinner(f"Enviando a {cliente['email_contacto']}..."):
+                                ok, msg = enviar_zip_por_email(
+                                    usuario_smtp=smtp_user,
+                                    password_smtp=smtp_pass,
+                                    destinatario=cliente["email_contacto"],
+                                    nombre_empresa=empresa_nombre,
+                                    nombre_zip=zip_nombre_match,
+                                    zip_bytes=zip_bytes_match,
+                                    mes=mes_elegido,
+                                    cuerpo_email=cuerpo_editado,
+                                )
+                            if ok:
+                                st.success(f"Enviado: {msg}")
+                            else:
+                                st.error(f"Fallo: {msg}")
 
                         st.markdown("---")
 
@@ -782,7 +717,6 @@ with main_tab_nominas:
                                     int((idx / len(empresas_enviables)) * 100),
                                     text=f"Enviando a {cli['email_contacto']}...",
                                 )
-                                # Usar el texto editado del text_area
                                 cuerpo_final = st.session_state.get(
                                     f"ta_{sk}",
                                     st.session_state.get(
